@@ -6,6 +6,9 @@ import json
 import platform
 import os
 
+from os import path as ospath
+
+
 from contextlib import redirect_stdout
 from dateutil import parser
 from ftplib import FTP, error_perm, error_temp
@@ -38,6 +41,52 @@ class DESMumePatcher(Patcher):
         data = file.read()
         return data[:len(data) - len(self.DESMUME_FOOTER)]
 
+
+class FTPWalk:
+    """
+    This class is contain corresponding functions for traversing the FTP
+    servers using BFS algorithm.
+    """
+    def __init__(self, connection):
+        self.connection = connection
+
+    def listdir(self, _path):
+        """
+        return files and directory names within a path (directory)
+        """
+
+        file_list, dirs, nondirs = [], [], []
+        try:
+            self.connection.cwd(_path)
+        except Exception as exp:
+            print ("the current path is : ", self.connection.pwd(), exp.__str__(),_path)
+            return [], []
+        else:
+            self.connection.retrlines('MLSD', lambda x: file_list.append(x.rsplit(';')))
+            for info in file_list:
+                ls_type, name = info[0], info[-1].strip()
+                if ls_type == 'Type=dir':
+                    dirs.append(name)
+                elif ls_type == 'Type=cdir':
+                    pass
+                else:
+                    nondirs.append(name)
+            return dirs, nondirs
+
+    def walk(self, path='/'):
+        """
+        Walk through FTP server's directory tree, based on a BFS algorithm.
+        """
+        dirs, nondirs = self.listdir(path)
+        yield path, dirs, nondirs
+        for name in dirs:
+            path = ospath.join(path, name)
+            yield from self.walk(path)
+            # In python2 use:
+            # for path, dirs, nondirs in self.walk(path):
+            #     yield path, dirs, nondirs
+            self.connection.cwd('..')
+            path = ospath.dirname(path)
 
 class FTPSync:
 
@@ -79,15 +128,15 @@ class FTPSync:
 
     def _get_previous_digest(self, path, remote=False):
         if remote:
-            return self.hash_db['remote'].get(path)
+            return self.hash_db['remote'].get(str(path))
         else:
-            return self.hash_db['local'].get(path)
+            return self.hash_db['local'].get(str(path))
 
     def _set_previous_digest(self, path, digest, remote=False):
         if remote:
-            self.hash_db['remote'][path] = digest
+            self.hash_db['remote'][str(path)] = digest
         else:
-            self.hash_db['local'][path] = digest
+            self.hash_db['local'][str(path)] = digest
 
     def _get_digest(self, path, remote=False, patcher=None):
         if remote:
@@ -157,9 +206,9 @@ class FTPSync:
         local_is_dir = os.path.isdir(local_path)
         remote_is_dir = self.ftp_helper.is_dir(remote_path)
         if local_is_dir and remote_is_dir:
-            for file in self.ftp_helper.get_file_list(remote_path):
-                filename = file.name
-                self.sync_to(local_path / filename, file, patcher=patcher)
+            for dir, dirs, files in self.ftp_helper.get_file_list(remote_path):
+                for file in files:
+                    self.sync_to(Path(local_path) / dir.lstrip(remote_path) / file, Path(dir) / file, patcher=patcher)
         elif not local_is_dir and not remote_is_dir:
             if digest is None:
                 digest = self._get_digest(local_path, remote=False)
@@ -174,9 +223,9 @@ class FTPSync:
         local_is_dir = os.path.isdir(local_path)
         remote_is_dir = self.ftp_helper.is_dir(remote_path)
         if local_is_dir and remote_is_dir:
-            for file in self.ftp_helper.get_file_list(remote_path):
-                filename = file.name
-                self.sync_to(local_path / filename, file, patcher=patcher)
+            for dir, dirs, files in self.ftp_helper.get_file_list(remote_path):
+                for file in files:
+                    self.sync_from(Path(local_path) / dir.lstrip(remote_path) / file, Path(dir) / file, patcher=patcher)
         elif not local_is_dir and not remote_is_dir:
             self.backup(local_path, remote=False)
             self.ftp_helper.download_file(remote_path, local_path, patcher=patcher)
@@ -192,9 +241,9 @@ class FTPSync:
         local_is_dir = os.path.isdir(local_path)
         remote_is_dir = self.ftp_helper.is_dir(remote_path)
         if local_is_dir and remote_is_dir:
-            for file in self.ftp_helper.get_file_list(remote_path):
-                filename = file.name
-                self.sync(Path(local_path) / filename, file, patcher=patcher)
+            for dir, dirs, files in self.ftp_helper.get_file_list(remote_path):
+                for file in files:
+                    self.sync(Path(local_path) / dir.lstrip(remote_path) / file, Path(dir) / file, patcher=patcher)
         if extensions is not None:
             if "local" in extensions and Path(local_path).suffix != extensions["local"]:
                 local_path = str(Path(local_path).stem) + extensions["local"]
@@ -247,6 +296,7 @@ class FTPHelper:
 
     def download_file(self, remote_path, local_path, patcher=None):
         logger.info(f"Downloading {remote_path} to {local_path}")
+        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
         if self.download_cache_path == remote_path and self.download_cache is not None:
             logger.info(f"Using cached download for {remote_path}")
             with open(local_path, "w+b") as lf:
@@ -310,17 +360,12 @@ class FTPHelper:
                     return line[0] == "d"
         return False
 
-    def get_file_list(self, d, recurse=False):
+    def get_file_list(self, d, recurse=True):
         if recurse:
-            raise NotImplementedError("Recursive sync not implemented yet")
+            ftpwalk = FTPWalk(self.ftp_connection)
+            return ftpwalk.walk(d)
         else:
-            listing = self.dir(d)
-            files = []
-            for line in listing.strip().split('\n'):
-                if line[0] != 'd':
-                    files.append(Path(d) / self._get_line_filename(line))
-            return files
-        
+            raise NotImplementedError("Non-Recursive sync not implemented yet")
 
     def last_modified(self, remote_path):
         def line_filename(line):
