@@ -14,7 +14,7 @@ Default config file location:
 
 Use either yaml or json. An example yaml file is provided with all of the currently supported options.
 
-If the patcher option is not specified, files will be transfered unmodified.
+If the patcher option is not specified, files will be transferred unmodified.
 
 ## Automatic sync behavior
 
